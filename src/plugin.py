@@ -14,31 +14,33 @@
 from datetime import datetime, timedelta
 from json import loads
 from os import makedirs
-from os.path import join, exists
+from os.path import exists, join
 from re import search
-from requests import get, exceptions
 from shutil import rmtree
-from twisted.internet.reactor import callInThread
-from xml.etree.ElementTree import tostring, parse
+from xml.etree.ElementTree import parse, tostring
 from zoneinfo import ZoneInfo
+from requests import get
+from requests.exceptions import RequestException
+from twisted.internet.reactor import callInThread
 
 # ENIGMA IMPORTS
-from enigma import getDesktop, eTimer, getPeerStreamingBoxes, BT_SCALE, BT_KEEP_ASPECT_RATIO, BT_HALIGN_CENTER, BT_VALIGN_CENTER
+from enigma import BT_HALIGN_CENTER, BT_KEEP_ASPECT_RATIO, BT_SCALE, BT_VALIGN_CENTER, eTimer, getDesktop, getPeerStreamingBoxes
+
 from Components.ActionMap import ActionMap
-from Components.config import config, ConfigSubsection, ConfigSelection, ConfigText, getConfigListEntry
+from Components.config import ConfigSelection, ConfigSubsection, ConfigText, config, getConfigListEntry
 from Components.ConfigList import ConfigListScreen
 from Components.Label import Label
 from Components.Pixmap import Pixmap
-from Components.Sources.List import List
 from Components.SystemInfo import BoxInfo
+from Components.Sources.List import List
 from Plugins.Plugin import PluginDescriptor
-from Screens.Screen import Screen
 from Screens.MessageBox import MessageBox
+from Screens.Screen import Screen
+from Tools.Directories import SCOPE_PLUGINS, resolveFilename
 from Tools.LoadPixmap import LoadPixmap
-from Tools.Directories import resolveFilename, SCOPE_PLUGINS
 
 # PLUGIN IMPORTS
-from . import PLUGINPATH, __version__, _  # for localized messages
+from . import PLUGINPATH, _, __version__  # for localized messages
 from .Buildstatus import Buildstatus
 
 # PLUGIN GLOBALS
@@ -323,7 +325,7 @@ class ATVfavorites(Screen, ATVglobs):
 		try:
 			response = get(f"{self.PICURL}{boxname}.png".encode(), timeout=(3.05, 6))
 			response.raise_for_status()
-		except exceptions.RequestException as error:
+		except RequestException as error:
 			print(f"[{self.MODULE_NAME}] ERROR in module 'imageDownload': {str(error)}")
 		else:
 			if exists(self.TEMPPATH):
@@ -352,7 +354,7 @@ class ATVfavorites(Screen, ATVglobs):
 			try:
 				response = get(url.encode(), timeout=(3.05, 6))
 				response.raise_for_status()
-			except exceptions.RequestException as error:
+			except RequestException as error:
 				print(f"[{self.MODULE_NAME}] ERROR in module 'getServerStatus': {str(error)}")
 			else:
 				try:
@@ -646,16 +648,28 @@ class ATVimageslist(Screen, ATVglobs):
 
 	def keyYellow(self):
 		if self.boxlist and self.FAVLIST:
-			self.favindex = (self.favindex + 1) % len(self.FAVLIST)
-			self.currbox = self.FAVLIST[self.favindex]
-			if self.currbox in self.boxlist:
-				self["menu"].setIndex(self.boxlist.index(self.currbox))
-				self.updateStatus()
-			else:
-				self.platidx = BS.platlist.index(self.currbox[1])
-				self.CS.moveToIndex(self.platidx)
-				self.setPlatformStatic()
-				self.refreshplatlist()
+			for offset in range(1, len(self.FAVLIST) + 1):
+				favoriteIndex = (self.favindex + offset) % len(self.FAVLIST)
+				favorite = self.FAVLIST[favoriteIndex]
+				if len(favorite) != 2 or not favorite[0] or not favorite[1]:
+					continue
+				platform = favorite[1] if " " in favorite[1] else BS.getplatform(favorite[1])
+				if platform not in BS.platlist:
+					continue
+				favorite = (favorite[0], platform)
+				if platform == self.currplat and favorite not in self.boxlist:
+					continue
+				self.favindex = favoriteIndex
+				self.currbox = favorite
+				if self.currbox in self.boxlist:
+					self["menu"].setIndex(self.boxlist.index(self.currbox))
+					self.updateStatus()
+				else:
+					self.platidx = BS.platlist.index(platform)
+					self.CS.moveToIndex(self.platidx)
+					self.setPlatformStatic()
+					self.refreshplatlist()
+				break
 
 	def keyUp(self):
 		self["menu"].up()
@@ -754,14 +768,14 @@ class ATVboxdetails(Screen, ATVglobs):
 			response = get(apiurl, timeout=(3.05, 6))
 			response.raise_for_status()
 			return loads(response.content)
-		except exceptions.RequestException as error:
+		except RequestException as error:
 			print(f"[{self.MODULE_NAME}] ERROR in module 'getAPIdata': {str(error)}")
 
 	def imageDownload(self, boxname):
 		try:
 			response = get(f"{self.PICURL}{boxname}.png".encode(), timeout=(3.05, 6))
 			response.raise_for_status()
-		except exceptions.RequestException as error:
+		except RequestException as error:
 			print(f"[{self.MODULE_NAME}] ERROR in module 'imageDownload': {str(error)}")
 		else:
 			with open(join(self.TEMPPATH, f"{boxname}.png"), "wb") as f:
