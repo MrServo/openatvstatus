@@ -21,7 +21,7 @@ from xml.etree.ElementTree import parse, tostring
 from zoneinfo import ZoneInfo
 from requests import get
 from requests.exceptions import RequestException
-from twisted.internet.reactor import callInThread
+from twisted.internet.reactor import callFromThread, callInThread
 
 # ENIGMA IMPORTS
 from enigma import BT_HALIGN_CENTER, BT_KEEP_ASPECT_RATIO, BT_SCALE, BT_VALIGN_CENTER, eTimer, getDesktop, getPeerStreamingBoxes
@@ -277,13 +277,13 @@ class ATVfavorites(Screen, ATVglobs):
 							bd = htmldict["boxinfo"][box[0]]
 							palette = {"Building": 0x00B028, "Failed": 0xFF0400, "Complete": 0xFFFFFF, "Waiting": 0xFFAE00}
 							color = palette.get(bd["BuildStatus"], 0xB0B0B0)
-							nextbuild, boxesahead, cycletime, counter, failed = BS.evaluate(box[0])
+							nextbuild, boxesahead, cycletime, counter, failed = BS.evaluate(box[0], htmldict)
 							if box[1] not in self.platdict:
 								self.platdict[currplat] = {}
 								self.platdict[currplat]["cycletime"] = f"{BS.strf_delta(cycletime)[:5]} h"
 								self.platdict[currplat]["boxcounter"] = f"{counter}"
 								self.platdict[currplat]["boxfailed"] = f"{failed}"
-							if BS.findbuildbox():
+							if BS.findbuildbox(htmldict):
 								nextbuild = self.fmtDateTime((datetime.now(tz=ZoneInfo("Europe/Berlin")) + nextbuild).strftime("%Y/%m/%d, %H:%M:%S")) if config.plugins.OpenATVstatus.nextbuild.value == "absolute" and nextbuild else f"{BS.strf_delta(nextbuild)[:5]} h"
 							else:
 								nextbuild, boxesahead = "server paused", "unclear"
@@ -469,6 +469,7 @@ class ATVimageslist(Screen, ATVglobs):
 		self.setTitle(_("Images list"))
 		self.boxlist = []
 		self.htmldict = {}
+		self.requestId = 0
 		self.platidx = BS.platlist.index(self.currplat)
 		self.currindex = 0
 		self.favindex = 0
@@ -525,9 +526,19 @@ class ATVimageslist(Screen, ATVglobs):
 
 	def refreshplatlist(self):
 		self.currplat = BS.platlist[self.platidx]
-		BS.getbuildinfos(BS.platlist[self.platidx], callback=self.refreshCallback)
+		self.requestId += 1
+		requestId = self.requestId
+		self.htmldict = None
+		self.makeimagelist()
+		# Keep overlapping requests separate and apply results on the GUI thread.
+		buildStatus = Buildstatus()
+		buildStatus.platlist = BS.platlist
+		buildStatus.platdict = BS.platdict
+		buildStatus.getbuildinfos(self.currplat, callback=lambda buildInfo: callFromThread(self.refreshCallback, buildInfo, requestId))
 
-	def refreshCallback(self, htmldict):
+	def refreshCallback(self, htmldict, requestId=None):
+		if requestId is not None and requestId != self.requestId:
+			return
 		self.htmldict = htmldict  # for updateList in case config will be changed
 		self.makeimagelist()
 
@@ -543,9 +554,9 @@ class ATVimageslist(Screen, ATVglobs):
 				buildtime = self.roundMinutes(bd["BuildTime"].strip())
 				synctime = self.roundMinutes(bd["SyncTime"].strip())
 				menulist.append(tuple([bd["No"], boxname, bd["BuildStatus"], self.fmtDateTime(bd["StartBuild"]), self.fmtDateTime(bd["StartFeedSync"]), self.fmtDateTime(bd["EndBuild"]), synctime, buildtime, color]))
-			self["menu"].updateList(menulist)
-			self.boxlist = boxlist
-		if self.currbox:
+		self.boxlist = boxlist
+		self["menu"].updateList(menulist)
+		if self.currbox and self.htmldict is not None:
 			foundbox = [item for item in boxlist if item == self.currbox]
 			if foundbox:
 				self["menu"].setIndex(self.boxlist.index(foundbox[0]))
@@ -554,32 +565,34 @@ class ATVimageslist(Screen, ATVglobs):
 
 	def updateStatus(self):
 		self.currindex = self["menu"].getSelectedIndex()
-		if self.boxlist and self.currindex is not None:
-			if [item for item in self.FAVLIST if item == self.boxlist[self.currindex]]:
+		buildInfo = self.htmldict
+		if buildInfo and self.currindex is not None and 0 <= self.currindex < len(self.boxlist):
+			if self.boxlist[self.currindex] in self.FAVLIST:
 				self["key_red"].setText(_("remove box from favorites"))
 			else:
 				self["key_red"].setText(_("add box to favorites"))
 			currbox = self.boxlist[self.currindex][0]
-			nextbuild, boxesahead, cycletime, counter, failed = BS.evaluate(currbox)
-			if BS.findbuildbox():
+			nextbuild, boxesahead, cycletime, counter, failed = BS.evaluate(currbox, buildInfo)
+			buildstatus = buildInfo["boxinfo"][currbox]["BuildStatus"]
+			if nextbuild and BS.findbuildbox(buildInfo):
 				boxinfo = _("Next build ends in %s, still %s boxes ahead") % (f"{BS.strf_delta(nextbuild)[:5]} h", boxesahead)
+			elif buildstatus == "Building":
+				boxinfo = _("Image is under construction, the duration is unclear...")
+			elif buildstatus == "Waiting":
+				boxinfo = _("Image is waiting with priority, the duration is unclear...")
 			else:
 				boxinfo = _("Server paused, unclear how many boxes are ahead...")
-			buildstatus = BS.htmldict["boxinfo"][self.boxlist[self.currindex][0]]["BuildStatus"] if BS.htmldict else ""
-			nextbuild = self.fmtDateTime((datetime.now(tz=ZoneInfo("Europe/Berlin")) + nextbuild).strftime("%Y/%m/%d, %H:%M:%S")) if config.plugins.OpenATVstatus.nextbuild.value == "absolute" and nextbuild else f"{BS.strf_delta(nextbuild)[:5]} h"
-			if nextbuild:
-				self["boxinfo"].setText(boxinfo)
-			elif buildstatus == "Building":
-				self["boxinfo"].setText(_("Image is under construction, the duration is unclear..."))
-			elif buildstatus == "Waiting":
-				self["boxinfo"].setText(_("Image is waiting with priority, the duration is unclear..."))
+			self["boxinfo"].setText(boxinfo)
 			if cycletime:
 				cycletime = f"{BS.strf_delta(cycletime)[:5]} h"
 				self["platinfo"].setText(f"{_('last build cycle')}: {cycletime}, {counter} {_('boxes')}, {_('failed')}: {failed}")
 			else:
-				self["boxinfo"].setText(_("No box found in this platform!"))
 				self["platinfo"].setText(_("Nothing to do - no build cycle"))
-				self["menu"].setList([])
+		else:
+			self.currindex = None
+			self["key_red"].setText("")
+			self["boxinfo"].setText(_("No box found in this platform!"))
+			self["platinfo"].setText("")
 
 	def nextPlatform(self):
 		self.platidx = (self.platidx + 1) % len(BS.platlist)
@@ -639,8 +652,8 @@ class ATVimageslist(Screen, ATVglobs):
 
 	def keyGreen(self):
 		if self.boxlist:
-			findbuildbox = (BS.findbuildbox(), self.currplat)
-			if findbuildbox[0]:
+			findbuildbox = (BS.findbuildbox(self.htmldict), self.currplat)
+			if findbuildbox in self.boxlist:
 				self["menu"].setIndex(self.boxlist.index(findbuildbox))
 				self.updateStatus()
 			else:
@@ -696,6 +709,7 @@ class ATVimageslist(Screen, ATVglobs):
 		self.updateStatus()
 
 	def exit(self):
+		self.requestId += 1  # Discard pending responses after the screen closes.
 		self.CS.stop()
 		self.close()
 

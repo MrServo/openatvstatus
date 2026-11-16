@@ -13,11 +13,12 @@
 
 # PYTHON IMPORTS
 from datetime import datetime, timedelta
-from getopt import getopt, GetoptError
-from json import loads, dump
-from re import search, findall, S, M
-from requests import get, exceptions
-from sys import exit, argv
+from getopt import GetoptError, getopt
+from json import dump, loads
+from re import M, S, findall, search
+from sys import argv, exit
+from requests import get
+from requests.exceptions import RequestException
 from twisted.internet.reactor import callInThread
 
 MODULE_NAME = __name__.split(".")[-1]
@@ -37,7 +38,7 @@ class Buildstatus:
 		try:
 			response = get("http://api.mynonpublic.com/content.json", timeout=(3.05, 6))
 			response.raise_for_status()
-		except exceptions.RequestException as err:
+		except RequestException as err:
 			self.error = f"[{MODULE_NAME}] ERROR in module 'start': '{str(err)}"
 			return {}
 		try:
@@ -72,7 +73,7 @@ class Buildstatus:
 			try:
 				response = get(self.url, timeout=(3.05, 6))
 				response.raise_for_status()
-			except exceptions.RequestException as err:
+			except RequestException as err:
 				self.error = f"[{MODULE_NAME}] ERROR in module 'getpage': '{str(err)}"
 				return
 			try:
@@ -160,24 +161,26 @@ class Buildstatus:
 			htmldict["boxinfo"][boxname]["BuildTime"] = dateset[4]
 		return htmldict
 
-	def findbuildbox(self):  # find boxname current image is build for
-		if self.htmldict is None:
+	def findbuildbox(self, buildInfo=None):  # find boxname current image is build for
+		buildInfo = self.htmldict if buildInfo is None else buildInfo
+		if buildInfo is None:
 			self.error = f"[{MODULE_NAME}] ERROR in module 'findbuildbox': self.htmldict is None"
 			return
 		hit = None
-		boxinfo = self.htmldict["boxinfo"]
+		boxinfo = buildInfo.get("boxinfo", {})
 		for boxname in list(boxinfo.keys()):
 			if "Building" in boxinfo[boxname]["BuildStatus"]:
 				hit = boxname
 				break
 		return hit
 
-	def evaluate(self, box=None):  # evaluate box data
-		if self.htmldict is None:
+	def evaluate(self, box=None, buildInfo=None):  # evaluate box data
+		buildInfo = self.htmldict if buildInfo is None else buildInfo
+		if buildInfo is None:
 			self.error = f"[{MODULE_NAME}] ERROR in module 'evaluate': self.htmldict is None"
 			return None, 0, None, 0, 0
-		buildbox = self.findbuildbox()
-		boxinfo = self.htmldict["boxinfo"]
+		buildbox = self.findbuildbox(buildInfo)
+		boxinfo = buildInfo.get("boxinfo", {})
 		nextbuild = timedelta()
 		cycletime = timedelta()
 		boxesahead = 0
@@ -214,10 +217,12 @@ class Buildstatus:
 		return nextbuild, boxesahead - 1, cycletime, boxcounter, failed
 
 	def strf_delta(self, td):  # converts deltatime-format in hours (e.g. '2 days, 01:00' in '49:00:00')
-		h, r = divmod(int(td.total_seconds()), 60 * 60)
-		m, s = divmod(r, 60)
-		h, m, s = (str(x).zfill(2) for x in (h, m, s))
-		return f"{h}:{m}:{s}"
+		duration = "--:--:--"
+		if td is not None:
+			hours, remainder = divmod(int(td.total_seconds()), 60 * 60)
+			minutes, seconds = divmod(remainder, 60)
+			duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+		return duration
 
 
 def main(argv):  # shell interface
